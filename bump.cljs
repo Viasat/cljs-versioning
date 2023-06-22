@@ -63,8 +63,8 @@ Version spec format:
     version-regex:      REGEX-STRING
     alt-version:        STRING
     alt-version-regex:  REGEX-STRING
+    exclude-latest:     true | false  # default to true
     date:               DATE-STRING
-    latest:             true | false
     image-creators:     STRING-LIST   # artifactory only
 
 Version spec keys:
@@ -77,10 +77,8 @@ Version spec keys:
   * version-regex: Match version against regex.
   * alt-version: Match beginning of alternate version/tag.
   * alt-version-regex: Match alternate version against regex.
-  * date: Matches everything earlier or equal to date (that is not
-    'latest').
-  * latest: Match everything except latest (sorting will result in
-    latest real tag).
+  * exclude-latest: Do not match 'latest' version/tag (default: true).
+  * date: Matches everything earlier or equal to date
   * image-creators: Match creator on any names in list.
 
 The --defaults-files argument specifies a comma separate list of files
@@ -159,7 +157,7 @@ file are:
                all
                (get by-type (keyword vtype))
                (get by-name (keyword vname)))))
-    {} all-defaults))
+    {:exclude-latest true} all-defaults))
 
 (defn enrich-spec
   "Enrich spec values with additional type specific variables."
@@ -274,17 +272,17 @@ file are:
       matches the beginning of version-field in rows
     - if version-regex spec specified, then filters rows where
       version-regex is a RegExp match on version-field in rows
+    - if exclude-latest is specified, then filter rows where
+      version-field is not equal to 'latest' (defaults to true).
     - if date is specified, then filters rows where date-field is less
-      than date and version is not equal to 'latest'
-    - if latest is specified, then filter rows where version-field is
-      not equal to 'latest' (so that latest actual version get selected)
+      than date.
     - if image-creators specified (and is not 'all'), then filters
       rows where creator-field is one of image-creators
 
   Last returned version string is the most recent version matching all
   criteria. Version strings are the row name-field and version-field,
   concatenated together using ver-delim."
-  [{:keys [upstream-api latest date image-creators
+  [{:keys [upstream-api exclude-latest date image-creators
            version version-regex alt-version alt-version-regex] :as spec}
    upstream-versions]
   (let [{:keys [spec-name-field name-field version-field date-field
@@ -332,10 +330,9 @@ file are:
                alt-version-regex (filter (fn [r] (some #(re-seq alt-ver-re %)
                                                        (:all-versions r))))
 
-               date (filter #(and (not= "latest" (get % version-field))
-                                  (<= (get % date-field) date)))
+               exclude-latest (filter #(not= "latest" (get % version-field)))
 
-               latest (filter #(not= "latest" (get % version-field)))
+               date (filter #(<= (get % date-field) date))
 
                (and creator-field
                     (not (empty? image-creators)))
