@@ -23,6 +23,8 @@ Usage:
 
 Options:
   -h --help                           Show help/usage.
+  --verbose                           Show verbose output (stderr)
+                                      [env: VERBOSE]
   --debug                             Show debug/trace output (stderr)
                                       [env: DEBUG]
   --defaults-files DEFAULTS-FILES     Comma separated files with default
@@ -337,9 +339,10 @@ file are:
 (P/let
   [cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
-   {:keys [version-spec-files debug defaults-files
+   {:keys [version-spec-files debug verbose defaults-files
            enumerate print-full-spec print-resolved-spec
            output-format artifactory-base-url]} cfg
+   verbose (if debug true verbose) ;; debug implies verbose
    _ (when debug (Eprintln "Settings:") (Epprint cfg))
 
    output-format (if (and (= "dotenv" output-format)
@@ -348,7 +351,7 @@ file are:
                    output-format)
 
    defaults (when defaults-files
-              (when debug (Eprintln "Loading defaults file" defaults-files))
+              (when verbose (Eprintln "Loading defaults:" defaults-files))
               (P/all (for [defaults-file (comma-split defaults-files)]
                        (P/-> (read-file defaults-file "utf8")
                              yaml/parse
@@ -356,7 +359,7 @@ file are:
    version-spec-files (P/then (P/all (map find-version-spec
                                           (comma-split version-spec-files)))
                               #(filter identity %))
-   _ (when debug (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
+   _ (when verbose (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
    version-spec (P/then (P/all (map load-version-spec version-spec-files))
                         #(apply merge-with merge {} %))
 
@@ -388,7 +391,7 @@ file are:
                      (assoc res vname (enrich-spec vname vspec)))
                    full-spec full-spec)
 
-   _ (when debug (Eprintln "Getting RPM versions and docker image tags (in parallel)"))
+   _ (when verbose (Eprintln "Getting docker image tags and RPM versions (in parallel)"))
    upstream-versions (get-upstream-versions cfg enriched-spec)
 
    ;; Resolve/filter versions for each version spec on command line
