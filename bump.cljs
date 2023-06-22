@@ -43,10 +43,36 @@ directories and non-existent files are skipped.  Found version spec
 files are merged one level deep, such that each variable's version
 specs are shallow merged.
 
-Version spec files can define a reserved key 'global' to set
-redundant version spec attributes in one place.  Within 'global'
-files can define common version specs for 'all' or for specific
-types (ex: 'image').
+Version spec format:
+    VARIABLE_NAME:
+      global:         OBJECT
+      type:           'rpm' | 'image'
+      image:          STRING        # 'image' type only
+      registry:       STRING        # 'image' type only
+      name:           STRING        # 'rpm' type only
+      repo:           STRING        # 'rpm' type only
+      version:        STRING
+      version-regex:  REGEX-STRING
+      date:           DATE-STRING
+      latest:         true | false
+      image-creators: STRING-LIST   # artifactory only
+
+Version spec keys have the following meaning:
+* global: Set redundant version spec attributes in one place. Within
+    'global' files can define common version specs for 'all' or
+    for specific types (ex: 'image').
+* type: Rest of spec is for RPM ('rpm') or docker image ('image')
+* image: Docker image name
+* registry: Docker image registry
+* name: RPM package name.
+* repo: RPM repository in artifactory.
+* version: Match beginning of version.
+* version-regex: Match version against regex.
+* date: Matches everything earlier or equal to date (that is not
+    'latest').
+* latest: Match everything except latest (sorting will result in
+    latest real tag).
+* image-creators: Match creator on any names in list.
 ")
 
 ;; General utility functions
