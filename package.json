@@ -1,11 +1,12 @@
 {
   "name": "@lonocloud/cljs-versioning",
   "version": "0.0.1",
-  "description": "Project versioning tools: docker-compose",
+  "description": "Project versioning tools: bump and docker-compose",
   "repository": "https://github.com/Viasat/cljs-versioning",
-  "license": "Copyright 2022 Viasat, Inc. All Rights Reserved",
+  "license": "Copyright 2023 Viasat, Inc. All Rights Reserved",
   "dependencies": {
     "@viasat/cljs-utils": "^0.1.2",
+    "@viasat/cljs-apis": "^0.0.1",
     "nbb": "^0.7.132",
     "yaml": "^2.1.3"
   }
