@@ -19,13 +19,14 @@ Bump/update/output version variables that represent artifacts by
 looking at their source repositories and filtering smartly.
 
 Usage:
-  bump [options] [<version-spec-file>]...
+  bump [options] <version-spec-files>
 
 Options:
   -h --help                           Show help/usage.
   --debug                             Show debug/trace output (stderr)
                                       [env: DEBUG]
-  --defaults-file DEFAULTS-FILE       Default spec data. Not used for selecting
+  --defaults-files DEFAULTS-FILES     Comma separated files with default
+                                      spec data. Not used for selecting
                                       which variables to query.
   --enumerate                         List all available versions that match each
                                       variable version spec
@@ -40,11 +41,12 @@ Options:
   --artifactory-identity-token TOKEN  Artifactory identity token
                                       [env: ARTIFACTORY_IDENTITY_TOKEN]
 
-version-spec-file arguments can be either directories or files.
-In directories bump looks for version-spec.(yaml|yml) files.  Empty
-directories and non-existent files are skipped.  Found version spec
-files are merged one level deep, such that each variable's version
-specs are shallow merged.
+The version-spec-files argument is a comma separated list of
+directories and/or files. For directories bump looks for
+version-spec.(yaml|yml) files in those directories.  Empty directories
+and non-existent files are skipped.  Found version spec files are
+merged one level deep, such that each variable's version specs are
+shallow merged.
 
 Version spec format:
   VARIABLE_NAME:
@@ -73,8 +75,10 @@ Version spec keys:
     latest real tag).
   * image-creators: Match creator on any names in list.
 
-A defaults file can be specified that contains default spec values.
-The top level keys in the defaults file are:
+The --defaults-files argument specifies a comma separate list of files
+that contain default spec values. Defaults from multiple files are
+merged at the spec map level. The top level keys of the defaults
+file are:
   * all: defaults that apply to all other spec values.
   * by-type: sub-keys are 'image' and/or 'rpm' that each contain
     defaults for all spec values of that type.
@@ -87,6 +91,8 @@ The top level keys in the defaults file are:
 ;; General utility functions
 
 (def ECR-REPO-RE #"([^.]*)\.dkr\.ecr\.([^.]*)\.amazonaws\.com")
+
+(defn comma-split [v] (if (string? v) (S/split v #",") v))
 
 (defn rpm? [{:keys [type]}] (= "rpm" type))
 (defn image? [{:keys [type]}] (= "image" type))
@@ -135,14 +141,17 @@ The top level keys in the defaults file are:
     (when-not (empty? errors)
       (str vname ": " (S/join ", " errors)))))
 
-(defn add-spec-defaults [defaults vname vspec]
-  (let [{:keys [all by-type by-name]} defaults
-        ;; type might be set in all and not in vspec
-        vtype (get vspec :type (get all :type))]
-    (merge all
-           (get by-type (keyword vtype))
-           (get by-name (keyword vname))
-           vspec)))
+(defn get-spec-defaults [all-defaults vname]
+  (reduce
+    (fn [spec defaults]
+      (let [{:keys [all by-type by-name]} defaults
+            ;; type might be set in all
+            vtype (get spec :type (get all :type))]
+        (merge spec
+               all
+               (get by-type (keyword vtype))
+               (get by-name (keyword vname)))))
+    {} all-defaults))
 
 (defn expand-spec [vname vspec]
   (let [{:keys [image namespace registry artifactory-api]} vspec
@@ -170,17 +179,20 @@ The top level keys in the defaults file are:
                  :name-field       :image
                  :version-field    :tag
                  :date-field       :lastUpdated
+                 :hash-field       [:checksums :sha256]
                  :ver-delim        ":"
                  :creator-field    :createdBy}
     :docker-ecr {:spec-name-field  :ecr-repo
                  :name-field       :repositoryName
                  :version-field    :tag
                  :date-field       :imagePushedAt
+                 :hash-field       [:imageDigest]
                  :ver-delim        ":"}
     :rpm        {:spec-name-field  :name
                  :name-field       :name
                  :version-field    :full-version
                  :date-field       :build-date
+                 :hash-field       [:checksum (keyword "$t")]
                  :ver-delim        "-"}))
 
 (defn resolve-versions
@@ -206,13 +218,34 @@ The top level keys in the defaults file are:
   concatenated together using ver-delim."
   [rows {:keys [upstream-api latest date version version-regex image-creators] :as spec}]
   (let [{:keys [spec-name-field name-field version-field date-field
-                creator-field ver-delim] :as rowspec} (get-version-row-spec upstream-api)
-        my-name (get spec spec-name-field)
+                hash-field creator-field ver-delim] :as rowspec} (get-version-row-spec upstream-api)
+        vname (get spec spec-name-field)
+
+        ;; Enrich the rows
+        ;; Add :version-string and :hash to all rows
+        rows (for [row rows
+                   :let [version (get row version-field)]
+                   :when version
+                   :let [ver-str (str vname ver-delim (get row version-field))
+                         hashval (get-in row hash-field)]]
+               (merge row {:version-string ver-str
+                           :hash hashval}))
+        ;; Group by image/package hash
+        grouped-rows (->> rows
+                          (group-by :hash)
+                          (map (fn [[hash v]]
+                                 [hash (map :version-string v)]))
+                          (into {}))
+        ;; Add :all-versions to each row that has the matching hash
+        rows (for [row rows]
+               (assoc row :all-versions (get grouped-rows (:hash row))))
+
+        ;; Filter the rows
         date (if date (js/Date. date) nil)
         ver-re (js/RegExp. version-regex)
         rows (sort-by date-field rows)
         rows (cond->> rows
-               my-name (filter #(= my-name (get % name-field)))
+               vname (filter #(= vname (get % name-field)))
 
                version (filter #(.startsWith (get % version-field) version))
 
@@ -226,9 +259,7 @@ The top level keys in the defaults file are:
                (and creator-field
                     (not (empty? image-creators)))
                , (filter #((set image-creators) (get % creator-field))))]
-    (->> rows
-         (keep #(get % version-field))
-         (mapv #(str my-name ver-delim %)))))
+    rows))
 
 (defn print-output [fmt results]
   (case fmt
@@ -238,12 +269,9 @@ The top level keys in the defaults file are:
     "yaml" (print (yaml/stringify (clj->js results)))))
 
 (P/let
-  [
-   ;; Setting `:laxPlacement true` with `<version-spec-file>...` (note the ...)
-   ;; causes neodoc to drop the default options' values
-   cfg (parse-opts usage *command-line-args* {})
+  [cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
-   {:keys [version-spec-file debug defaults-file enumerate print-full-spec
+   {:keys [version-spec-files debug defaults-files enumerate print-full-spec
            output-format profile artifactory-base-url]} cfg
    _ (when debug (Eprintln "Settings:") (Epprint cfg))
 
@@ -251,12 +279,14 @@ The top level keys in the defaults file are:
                        (or enumerate print-full-spec)))
              "Cannot use default 'dotenv' format with --enumerate or --print-full-spec")
 
-   defaults (when defaults-file
-              (when debug (Eprintln "Loading defaults file" defaults-file))
-              (P/-> (read-file defaults-file "utf8")
-                    yaml/parse
-                    ->clj))
-   version-spec-files (P/then (P/all (map find-version-spec version-spec-file))
+   defaults (when defaults-files
+              (when debug (Eprintln "Loading defaults file" defaults-files))
+              (P/all (for [defaults-file (comma-split defaults-files)]
+                       (P/-> (read-file defaults-file "utf8")
+                             yaml/parse
+                             ->clj))))
+   version-spec-files (P/then (P/all (map find-version-spec
+                                          (comma-split version-spec-files)))
                               #(filter identity %))
    _ (when debug (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
    version-spec (P/then (P/all (map load-version-spec version-spec-files))
@@ -264,9 +294,10 @@ The top level keys in the defaults file are:
 
    ;; add defaults before validation checks
    full-spec (reduce
-              (fn [res [vname vspec]]
-                (assoc res vname (add-spec-defaults defaults vname vspec)))
-              version-spec version-spec)
+               (fn [res [vname vspec]]
+                 (assoc res vname (merge (get-spec-defaults defaults vname)
+                                         vspec)))
+               version-spec version-spec)
 
    validation-errors (keep #(apply validation-error %)
                            ;; for spec values in original spec files
@@ -338,22 +369,26 @@ The top level keys in the defaults file are:
                    (sort-by :imagePushedAt))
 
    ;; Resolve updated value for each version spec on command line
-   resolved (reduce (fn [res [k vspec]]
-                      (let [rows (get {:docker-art art-images
-                                       :docker-ecr ecr-images
-                                       :rpm rpms} (:upstream-api vspec))]
-                        (assoc-in res [k :upstream-versions]
-                                  (resolve-versions rows vspec))))
-                    versions versions)
+   resolved (reduce
+              (fn [res [vname vspec]]
+                (let [rows (get {:docker-art art-images
+                                 :docker-ecr ecr-images
+                                 :rpm rpms} (:upstream-api vspec))
+                      rows (resolve-versions rows vspec)]
+                  (assoc-in res [vname :version-details] rows)))
+              versions versions)
 
-   unresolved (filter (comp empty? :upstream-versions) (vals resolved))]
+
+   unresolved (filter (comp empty? :version-details) (vals resolved))]
 
   (assert (empty? unresolved)
           (str "Could not resolve versions for: "
                (S/join ", " (map :var-name unresolved))))
 
   (->> (for [[k v] resolved
-             :let [versions (get-in resolved [k :upstream-versions] [v])]]
+             :let [details (get-in resolved [k :version-details]
+                                   [{:version-string v}])
+                   versions (map :version-string details)]]
          [k (if enumerate versions (last versions))])
        (into {})
        (print-output output-format)))
