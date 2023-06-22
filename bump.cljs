@@ -54,16 +54,18 @@ shallow merged.
 
 Version spec format:
   VARIABLE_NAME:
-    type:           'rpm' | 'image'
-    image:          STRING        # 'image' type only
-    registry:       STRING        # 'image' type only
-    name:           STRING        # 'rpm' type only
-    repo:           STRING        # 'rpm' type only
-    version:        STRING
-    version-regex:  REGEX-STRING
-    date:           DATE-STRING
-    latest:         true | false
-    image-creators: STRING-LIST   # artifactory only
+    type:               'rpm' | 'image'
+    image:              STRING        # 'image' type only
+    registry:           STRING        # 'image' type only
+    name:               STRING        # 'rpm' type only
+    repo:               STRING        # 'rpm' type only
+    version:            STRING
+    version-regex:      REGEX-STRING
+    alt-version:        STRING
+    alt-version-regex:  REGEX-STRING
+    date:               DATE-STRING
+    latest:             true | false
+    image-creators:     STRING-LIST   # artifactory only
 
 Version spec keys:
   * type: Rest of spec is for RPM ('rpm') or docker image ('image')
@@ -73,6 +75,8 @@ Version spec keys:
   * repo: RPM repository in artifactory.
   * version: Match beginning of version.
   * version-regex: Match version against regex.
+  * alt-version: Match beginning of alternate version/tag.
+  * alt-version-regex: Match alternate version against regex.
   * date: Matches everything earlier or equal to date (that is not
     'latest').
   * latest: Match everything except latest (sorting will result in
@@ -280,7 +284,8 @@ file are:
   Last returned version string is the most recent version matching all
   criteria. Version strings are the row name-field and version-field,
   concatenated together using ver-delim."
-  [{:keys [upstream-api latest date version version-regex image-creators] :as spec}
+  [{:keys [upstream-api latest date image-creators
+           version version-regex alt-version alt-version-regex] :as spec}
    upstream-versions]
   (let [{:keys [spec-name-field name-field version-field date-field
                 hash-field creator-field ver-delim] :as rowspec}
@@ -294,15 +299,16 @@ file are:
         rows (for [row rows
                    :let [version (get row version-field)]
                    :when version
-                   :let [ver-str (str vname ver-delim (get row version-field))
+                   :let [ver-str (str vname ver-delim version)
                          hashval (get-in row hash-field)]]
                (merge row {:version-string ver-str
+                           :matched-version version
                            :hash hashval}))
         ;; Group by image/package hash
         grouped-rows (->> rows
                           (group-by :hash)
                           (map (fn [[hash v]]
-                                 [hash (map :version-string v)]))
+                                 [hash (map :matched-version v)]))
                           (into {}))
         ;; Add :all-versions to each row that has the matching hash
         rows (for [row rows]
@@ -311,6 +317,7 @@ file are:
         ;; Filter the rows
         date (if date (js/Date. date) nil)
         ver-re (js/RegExp. version-regex)
+        alt-ver-re (js/RegExp. alt-version-regex)
         rows (sort-by date-field rows)
         rows (cond->> rows
                vname (filter #(= vname (get % name-field)))
@@ -318,6 +325,12 @@ file are:
                version (filter #(.startsWith (get % version-field) version))
 
                version-regex (filter #(re-seq ver-re (get % version-field)))
+
+               alt-version (filter (fn [r] (some #(.startsWith % alt-version)
+                                                 (:all-versions r))))
+
+               alt-version-regex (filter (fn [r] (some #(re-seq alt-ver-re %)
+                                                       (:all-versions r))))
 
                date (filter #(and (not= "latest" (get % version-field))
                                   (<= (get % date-field) date)))
