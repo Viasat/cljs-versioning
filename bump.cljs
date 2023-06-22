@@ -25,7 +25,10 @@ Options:
   -h --help                           Show help/usage.
   --debug                             Show debug/trace output (stderr)
                                       [env: DEBUG]
-  --enumerate                         All available versions that match each variable version spec
+  --defaults-file DEFAULTS-FILE       Default spec data. Not used for selecting
+                                      which variables to query.
+  --enumerate                         List all available versions that match each
+                                      variable version spec
   --print-full-spec                   Output the full, merged version spec
   --output-format FORMAT              Formats: dotenv, json, yaml [default: dotenv]
 
@@ -44,35 +47,41 @@ files are merged one level deep, such that each variable's version
 specs are shallow merged.
 
 Version spec format:
-    VARIABLE_NAME:
-      global:         OBJECT
-      type:           'rpm' | 'image'
-      image:          STRING        # 'image' type only
-      registry:       STRING        # 'image' type only
-      name:           STRING        # 'rpm' type only
-      repo:           STRING        # 'rpm' type only
-      version:        STRING
-      version-regex:  REGEX-STRING
-      date:           DATE-STRING
-      latest:         true | false
-      image-creators: STRING-LIST   # artifactory only
+  VARIABLE_NAME:
+    type:           'rpm' | 'image'
+    image:          STRING        # 'image' type only
+    registry:       STRING        # 'image' type only
+    name:           STRING        # 'rpm' type only
+    repo:           STRING        # 'rpm' type only
+    version:        STRING
+    version-regex:  REGEX-STRING
+    date:           DATE-STRING
+    latest:         true | false
+    image-creators: STRING-LIST   # artifactory only
 
-Version spec keys have the following meaning:
-* global: Set redundant version spec attributes in one place. Within
-    'global' files can define common version specs for 'all' or
-    for specific types (ex: 'image').
-* type: Rest of spec is for RPM ('rpm') or docker image ('image')
-* image: Docker image name
-* registry: Docker image registry
-* name: RPM package name.
-* repo: RPM repository in artifactory.
-* version: Match beginning of version.
-* version-regex: Match version against regex.
-* date: Matches everything earlier or equal to date (that is not
+Version spec keys:
+  * type: Rest of spec is for RPM ('rpm') or docker image ('image')
+  * image: Docker image name
+  * registry: Docker image registry
+  * name: RPM package name.
+  * repo: RPM repository in artifactory.
+  * version: Match beginning of version.
+  * version-regex: Match version against regex.
+  * date: Matches everything earlier or equal to date (that is not
     'latest').
-* latest: Match everything except latest (sorting will result in
+  * latest: Match everything except latest (sorting will result in
     latest real tag).
-* image-creators: Match creator on any names in list.
+  * image-creators: Match creator on any names in list.
+
+A defaults file can be specified that contains default spec values.
+The top level keys in the defaults file are:
+  * all: defaults that apply to all other spec values.
+  * by-type: sub-keys are 'image' and/or 'rpm' that each contain
+    defaults for all spec values of that type.
+  * by-name: sub-keys are spec value names with default that will be
+    applied to the matching spec value by name. If the named spec
+    value does not exist in a specified version-spec file then it will
+    be ignored.
 ")
 
 ;; General utility functions
@@ -112,6 +121,8 @@ Version spec keys have the following meaning:
          (map (fn [[k v]] [(name k) v]))
          (into {})))
 
+
+
 (defn validation-error [vname vspec]
   (let [check-missing (fn [v ks]
                         (keep #(when-not (get v %)
@@ -124,11 +135,17 @@ Version spec keys have the following meaning:
     (when-not (empty? errors)
       (str vname ": " (S/join ", " errors)))))
 
-(defn enrich-spec [global vname vspec]
-  (let [vspec (merge (:all global)
-                     (get global (keyword (:type vspec)))
-                     vspec)
-        {:keys [image namespace registry artifactory-api]} vspec
+(defn add-spec-defaults [defaults vname vspec]
+  (let [{:keys [all by-type by-name]} defaults
+        ;; type might be set in all and not in vspec
+        vtype (get vspec :type (get all :type))]
+    (merge all
+           (get by-type (keyword vtype))
+           (get by-name (keyword vname))
+           vspec)))
+
+(defn expand-spec [vname vspec]
+  (let [{:keys [image namespace registry artifactory-api]} vspec
 
         [[_ ecr-acct ecr-region]] (re-seq ECR-REPO-RE (or registry ""))]
     (cond-> vspec
@@ -226,35 +243,50 @@ Version spec keys have the following meaning:
    ;; causes neodoc to drop the default options' values
    cfg (parse-opts usage *command-line-args* {})
    _ (when (empty? cfg) (fatal 2))
-   {:keys [version-spec-file debug enumerate print-full-spec output-format
-           profile artifactory-base-url]} cfg
+   {:keys [version-spec-file debug defaults-file enumerate print-full-spec
+           output-format profile artifactory-base-url]} cfg
    _ (when debug (Eprintln "Settings:") (Epprint cfg))
 
    _ (assert (not (and (= "dotenv" output-format)
                        (or enumerate print-full-spec)))
              "Cannot use default 'dotenv' format with --enumerate or --print-full-spec")
 
+   defaults (when defaults-file
+              (when debug (Eprintln "Loading defaults file" defaults-file))
+              (P/-> (read-file defaults-file "utf8")
+                    yaml/parse
+                    ->clj))
    version-spec-files (P/then (P/all (map find-version-spec version-spec-file))
                               #(filter identity %))
    _ (when debug (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
    version-spec (P/then (P/all (map load-version-spec version-spec-files))
                         #(apply merge-with merge {} %))
-   _ (when print-full-spec
-       (print-output output-format version-spec)
-       (js/process.exit 0))
 
-   global-spec (get version-spec "global" {})
-   version-spec (dissoc version-spec "global")
-   versions (reduce
+   ;; add defaults before validation checks
+   full-spec (reduce
               (fn [res [vname vspec]]
-                (assoc res vname (enrich-spec global-spec vname vspec)))
+                (assoc res vname (add-spec-defaults defaults vname vspec)))
               version-spec version-spec)
-   validation-errors (keep #(apply validation-error %) versions)
+
+   validation-errors (keep #(apply validation-error %)
+                           ;; for spec values in original spec files
+                           ;; (i.e. not from defaults), sanity check
+                           ;; those with the merged defaults
+                           (select-keys full-spec (keys version-spec)))
    _ (when-not (empty? validation-errors)
        (Eprintln "Invalid specs found:")
        (doseq [msg validation-errors]
          (Eprintln msg))
        (js/process.exit 1))
+
+   _ (when print-full-spec
+       (print-output output-format full-spec)
+       (js/process.exit 0))
+
+   versions (reduce
+              (fn [res [vname vspec]]
+                (assoc res vname (expand-spec vname vspec)))
+              full-spec full-spec)
 
    _ (when debug (Eprintln "Getting RPM versions and docker image tags (in parallel)"))
    art-headers (artifactory/get-auth-headers cfg)
@@ -265,7 +297,7 @@ Version spec keys have the following meaning:
    [repo-rpms repo-art-images repo-ecr-images]
    , (P/all
        [(P/all
-          (for [repo (distinct (map :repo (filter rpm? (vals version-spec))))]
+          (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
             (P/->>
               (rpm/get-rpms repo {:base-url artifactory-base-url
                                   :dbg (if debug Eprintln identity)})
