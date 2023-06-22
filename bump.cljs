@@ -27,11 +27,13 @@ Options:
                                       [env: DEBUG]
   --defaults-files DEFAULTS-FILES     Comma separated files with default
                                       spec data. Not used for selecting
-                                      which variables to query.
+                                      which spec names to query/resolve.
   --enumerate                         List all available versions that match each
                                       variable version spec
-  --print-full-spec                   Output the full, merged version spec
+  --print-full-spec                   Output the merged version spec with defaults
+  --print-resolved-spec               Output the full spec with upstream versions.
   --output-format FORMAT              Formats: dotenv, json, yaml [default: dotenv]
+                                      Defaults to json for --enumerate, --print-*-spec
 
   --profile PROFILE                   AWS profile for ECR access [env: PROFILE]
   --artifactory-base-url URL          Artifactory base URL
@@ -153,7 +155,9 @@ file are:
                (get by-name (keyword vname)))))
     {} all-defaults))
 
-(defn expand-spec [vname vspec]
+(defn enrich-spec
+  "Enrich spec values with additional type specific variables."
+  [vname vspec]
   (let [{:keys [image namespace registry artifactory-api]} vspec
 
         [[_ ecr-acct ecr-region]] (re-seq ECR-REPO-RE (or registry ""))]
@@ -172,6 +176,64 @@ file are:
                                  :ecr-repo (if namespace
                                              (str namespace "/" image)
                                              (str image))))))
+
+(defn get-upstream-versions
+  "Returns a map of versions keyed by api type:
+       :docker-art, :docker-ecr, :rpm"
+  [{:keys [debug profile artifactory-base-url] :as cfg} versions]
+  (when debug (artifactory/enable-debug))
+  (P/let
+    [art-headers (artifactory/get-auth-headers cfg)
+     artifactory-api (str artifactory-base-url "/api")
+     aws-opts (if profile
+                {:debug debug :profile profile}
+                {:debug debug :no-profile true})
+     [repo-rpms repo-art-images repo-ecr-images]
+     , (P/all
+         [(P/all
+            (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
+              (P/->>
+                (rpm/get-rpms repo {:base-url artifactory-base-url
+                                    :dbg (if debug Eprintln identity)})
+                (map #(assoc % :repo repo)))))
+          (P/all
+            (for [{:keys [artifactory-api registry image-repo]} (filter :artifactory-api (vals versions))]
+              (artifactory/get-full-images
+                registry [image-repo] {:artifactory-api artifactory-api
+                                       :axios-opts {:headers art-headers}})))
+          (P/all
+            (for [{:keys [ecr-repo-acct ecr-repo-region ecr-repo]}
+                  , (filter :ecr-repo-acct (vals versions))]
+              (P/->>
+                (aws/invoke :ECR :DescribeImages
+                            (merge aws-opts {:region ecr-repo-region
+                                             :repositoryName ecr-repo}))
+                :imageDetails)))])
+
+     ;; Add :full-version and parsed :build-date and sort by :build-date
+     rpms (->> (apply concat repo-rpms)
+               (map #(merge % {:full-version (str (-> % :version :ver)
+                                                  "-" (-> % :version :rel)
+                                                  "." (-> % :arch))
+                               :build-date (-> % :time :build
+                                               js/parseInt (* 1000)
+                                               js/Date.)}))
+               (sort-by :build-date))
+
+     ;; Parse :lastUpdated and sort by it
+     art-images (->> (apply concat repo-art-images)
+                     (filter :lastUpdated)
+                     (map #(update % :lastUpdated (fn [d] (js/Date. d))))
+                     (sort-by :lastUpdated))
+
+     ecr-images (->> (apply concat repo-ecr-images)
+                     (mapcat #(for [t (:imageTags %)]
+                                (-> % (assoc :tag t) (dissoc :imageTags))))
+                     (sort-by :imagePushedAt))]
+    {:docker-art art-images
+     :docker-ecr ecr-images
+     :rpm        rpms}))
+
 
 (defn get-version-row-spec [kind]
   (condp = kind
@@ -196,8 +258,8 @@ file are:
                  :ver-delim        "-"}))
 
 (defn resolve-versions
-  "Takes version rows and a version spec.  Returns string versions
-  from matching rows, sorted by date-field.
+  "Takes version spec and version rows for that spec. Returns string
+  versions from matching rows, sorted by date-field.
 
   Filters according to the following row/version selection algorithm:
     - filters rows where spec-name-field in spec equals name-field in
@@ -216,10 +278,14 @@ file are:
   Last returned version string is the most recent version matching all
   criteria. Version strings are the row name-field and version-field,
   concatenated together using ver-delim."
-  [rows {:keys [upstream-api latest date version version-regex image-creators] :as spec}]
+  [{:keys [upstream-api latest date version version-regex image-creators] :as spec}
+   upstream-versions]
   (let [{:keys [spec-name-field name-field version-field date-field
-                hash-field creator-field ver-delim] :as rowspec} (get-version-row-spec upstream-api)
+                hash-field creator-field ver-delim] :as rowspec}
+        , (get-version-row-spec upstream-api)
         vname (get spec spec-name-field)
+        ;; Get just the rows for this upstream API type
+        rows (get upstream-versions upstream-api)
 
         ;; Enrich the rows
         ;; Add :version-string and :hash to all rows
@@ -259,7 +325,7 @@ file are:
                (and creator-field
                     (not (empty? image-creators)))
                , (filter #((set image-creators) (get % creator-field))))]
-    rows))
+    (assoc spec :version-details rows)))
 
 (defn print-output [fmt results]
   (case fmt
@@ -271,13 +337,15 @@ file are:
 (P/let
   [cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
-   {:keys [version-spec-files debug defaults-files enumerate print-full-spec
-           output-format profile artifactory-base-url]} cfg
+   {:keys [version-spec-files debug defaults-files
+           enumerate print-full-spec print-resolved-spec
+           output-format artifactory-base-url]} cfg
    _ (when debug (Eprintln "Settings:") (Epprint cfg))
 
-   _ (assert (not (and (= "dotenv" output-format)
-                       (or enumerate print-full-spec)))
-             "Cannot use default 'dotenv' format with --enumerate or --print-full-spec")
+   output-format (if (and (= "dotenv" output-format)
+                          (or enumerate print-full-spec print-resolved-spec))
+                   "json"
+                   output-format)
 
    defaults (when defaults-files
               (when debug (Eprintln "Loading defaults file" defaults-files))
@@ -314,80 +382,34 @@ file are:
        (print-output output-format full-spec)
        (js/process.exit 0))
 
-   versions (reduce
-              (fn [res [vname vspec]]
-                (assoc res vname (expand-spec vname vspec)))
-              full-spec full-spec)
+   ;; Add additional type specific derived values
+   enriched-spec (reduce
+                   (fn [res [vname vspec]]
+                     (assoc res vname (enrich-spec vname vspec)))
+                   full-spec full-spec)
 
    _ (when debug (Eprintln "Getting RPM versions and docker image tags (in parallel)"))
-   art-headers (artifactory/get-auth-headers cfg)
-   aws-opts (if profile
-              {:debug debug :profile profile}
-              {:debug debug :no-profile true})
-   _ (when debug (artifactory/enable-debug))
-   [repo-rpms repo-art-images repo-ecr-images]
-   , (P/all
-       [(P/all
-          (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
-            (P/->>
-              (rpm/get-rpms repo {:base-url artifactory-base-url
-                                  :dbg (if debug Eprintln identity)})
-              (map #(assoc % :repo repo)))))
-        (P/all
-          (for [{:keys [artifactory-api registry image-repo]} (filter :artifactory-api (vals versions))]
-            (artifactory/get-full-images
-              registry [image-repo] {:artifactory-api artifactory-api
-                                     :axios-opts {:headers art-headers}})))
-        (P/all
-          (for [{:keys [ecr-repo-acct ecr-repo-region ecr-repo]}
-                , (filter :ecr-repo-acct (vals versions))]
-            (P/->>
-              (aws/invoke :ECR :DescribeImages
-                          (merge aws-opts {:region ecr-repo-region
-                                           :repositoryName ecr-repo}))
-              :imageDetails)))])
+   upstream-versions (get-upstream-versions cfg enriched-spec)
 
-   ;; Add :full-version and parsed :build-date and sort by :build-date
-   rpms (->> (apply concat repo-rpms)
-             (map #(merge % {:full-version (str (-> % :version :ver)
-                                                "-" (-> % :version :rel)
-                                                "." (-> % :arch))
-                             :build-date (-> % :time :build
-                                             js/parseInt (* 1000)
-                                             js/Date.)}))
-             (sort-by :build-date))
+   ;; Resolve/filter versions for each version spec on command line
+   resolved-spec (reduce
+                   (fn [res [vname vspec]]
+                     (assoc res vname (resolve-versions vspec upstream-versions)))
+                   enriched-spec enriched-spec)
 
-   ;; Parse :lastUpdated and sort by it
-   art-images (->> (apply concat repo-art-images)
-                   (filter :lastUpdated)
-                   (map #(update % :lastUpdated (fn [d] (js/Date. d))))
-                   (sort-by :lastUpdated))
+   _ (when print-resolved-spec
+       (print-output output-format resolved-spec)
+       (js/process.exit 0))
 
-   ecr-images (->> (apply concat repo-ecr-images)
-                   (mapcat #(for [t (:imageTags %)]
-                              (-> % (assoc :tag t) (dissoc :imageTags))))
-                   (sort-by :imagePushedAt))
-
-   ;; Resolve updated value for each version spec on command line
-   resolved (reduce
-              (fn [res [vname vspec]]
-                (let [rows (get {:docker-art art-images
-                                 :docker-ecr ecr-images
-                                 :rpm rpms} (:upstream-api vspec))
-                      rows (resolve-versions rows vspec)]
-                  (assoc-in res [vname :version-details] rows)))
-              versions versions)
-
-
-   unresolved (filter (comp empty? :version-details) (vals resolved))]
+   unresolved (filter (comp empty? :version-details) (vals resolved-spec))]
 
   (assert (empty? unresolved)
           (str "Could not resolve versions for: "
                (S/join ", " (map :var-name unresolved))))
 
-  (->> (for [[k v] resolved
-             :let [details (get-in resolved [k :version-details]
-                                   [{:version-string v}])
+  (->> (for [[k v] resolved-spec
+             :let [details (get v :version-details
+                                [{:version-string v}])
                    versions (map :version-string details)]]
          [k (if enumerate versions (last versions))])
        (into {})
