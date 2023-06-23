@@ -27,13 +27,13 @@ Options:
                                       [env: VERBOSE]
   --debug                             Show debug/trace output (stderr)
                                       [env: DEBUG]
-  --defaults-files DEFAULTS-FILES     Comma separated files with default
-                                      spec data. Not used for selecting
+  --defaults-files DEFAULTS-FILES     Comma separated files and/or directories with
+                                      default spec data. Not used for selecting
                                       which spec names to query/resolve.
   --enumerate                         List all available versions that match each
                                       variable version spec
   --print-full-spec                   Output the merged version spec with defaults
-  --print-resolved-spec               Output the full spec with upstream versions.
+  --print-resolved-spec               Output the full spec with upstream version details
   --output-format FORMAT              Formats: dotenv, json, yaml [default: dotenv]
                                       Defaults to json for --enumerate, --print-*-spec
 
@@ -73,8 +73,7 @@ Version spec keys:
   * registry: Docker image registry
   * name: RPM package name.
   * repo: RPM repository in artifactory.
-  * version: Match beginning of version.
-  * version-regex: Match version against regex.
+  * version: Match beginning of version.  * version-regex: Match version against regex.
   * alt-version: Match beginning of alternate version/tag.
   * alt-version-regex: Match alternate version against regex.
   * exclude-latest: Do not match 'latest' version/tag (default: true).
@@ -115,24 +114,31 @@ file are:
       (P/then #(.isDirectory %))
       (P/catch (constantly false))))
 
-(defn find-version-spec [path]
-  (P/let [dir? (directory? path)
-          paths (if dir?
-                  (map #(str path %) ["/version-spec.yaml" "/version-spec.yml"])
-                  [path])
-          paths (P/all
-                  (for [p paths]
-                    (P/let [exists? (file-exists? p)]
-                      (when exists? p))))]
-    (first (filter identity paths))))
+(defn find-files
+  "Check each path in roots. If the path is a directory then search
+  for the first path+suffix that exists in that directory."
+  [dirs-or-files suffixes]
+  (P/then
+    (P/all
+      (for [path dirs-or-files]
+        (P/let [dir? (directory? path)
+                paths (if dir?
+                        (map #(str path "/" %) suffixes)
+                        [path])
+                paths (P/all
+                        (for [p paths]
+                          (P/let [exists? (file-exists? p)]
+                            (when exists? p))))]
+          (first (filter identity paths)))))
+    #(filter identity %)))
+
+(defn load-yaml [path]
+  (P/-> (read-file path "utf8") yaml/parse ->clj))
 
 (defn load-version-spec [path]
-  (P/->> (read-file path "utf8")
-         yaml/parse
-         ->clj
+  (P/->> (load-yaml path)
          (map (fn [[k v]] [(name k) v]))
          (into {})))
-
 
 
 (defn validation-error [vname vspec]
@@ -359,16 +365,16 @@ file are:
                           (or enumerate print-full-spec print-resolved-spec))
                    "json"
                    output-format)
+   defaults-files     (find-files (comma-split defaults-files)
+                                  ["version-spec-defaults.yaml"
+                                   "version-spec-defaults.yml"])
+   version-spec-files (find-files (comma-split version-spec-files)
+                                  ["version-spec.yaml"
+                                   "version-spec.yml"])
 
    defaults (when defaults-files
               (when verbose (Eprintln "Loading defaults:" defaults-files))
-              (P/all (for [defaults-file (comma-split defaults-files)]
-                       (P/-> (read-file defaults-file "utf8")
-                             yaml/parse
-                             ->clj))))
-   version-spec-files (P/then (P/all (map find-version-spec
-                                          (comma-split version-spec-files)))
-                              #(filter identity %))
+              (P/all (map load-yaml defaults-files)))
    _ (when verbose (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
    version-spec (P/then (P/all (map load-version-spec version-spec-files))
                         #(apply merge-with merge {} %))
