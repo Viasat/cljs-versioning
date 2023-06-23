@@ -389,7 +389,8 @@ file are:
        (Eprintln "Invalid specs found:")
        (doseq [msg validation-errors]
          (Eprintln msg))
-       (js/process.exit 1))
+       (when (not print-full-spec)
+         (js/process.exit 1)))
 
    _ (when print-full-spec
        (print-output output-format full-spec)
