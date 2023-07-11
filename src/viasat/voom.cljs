@@ -24,7 +24,7 @@
   specified paths. If there are any local changes or unstaged files at
   those paths then add a final vresion with '_DIRTY' appended to the
   version and with a timestamp/date-str of right now."
-  [paths all?]
+  [paths dirty-suffix all?]
   (P/let
     [git-cmd #(P/-> (exec (str "git " (S/join " " %&))) :stdout trim)
      targs (S/join " " paths)
@@ -50,8 +50,8 @@
                 (merge
                   curver
                   {:date-str (dateformat (js/Date.) "yyyymmdd_HHMMss")
-                   :sha (str (:sha curver) "_DIRTY")
-                   :voom-version (str (:voom-version curver) "_DIRTY")})))))))
+                   :sha (str (:sha curver) dirty-suffix)
+                   :voom-version (str (:voom-version curver) dirty-suffix)})))))))
 
 (defn voom-version [paths]
-  (P/-> (voom-versions-data paths false) last :voom-version))
+  (P/-> (voom-versions-data paths "_DIRTY" false) last :voom-version))

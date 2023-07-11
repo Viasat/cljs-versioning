@@ -220,13 +220,14 @@ Version spec keys:
 (defn query-local-versions
   "Query local versions and return a map keyed by version type:
   :voom (currently only :voom is supported)"
-  [{:keys [debug root-dir all-local] :or {:root-dir "."}} versions]
+  [{:keys [debug root-dir dirty-suffix all-local]
+    :or {root-dir "." dirty-suffix "_DIRTY"}} versions]
   (P/let
     [voom-versions
      , (P/all
          (for [[vname vspec] (filter (comp git? val) versions)]
            (P/let [paths (map #(canonicalize % root-dir) (:paths vspec))
-                   versions (voom/voom-versions-data paths all-local)]
+                   versions (voom/voom-versions-data paths dirty-suffix all-local)]
              (map #(assoc % :module vname) versions))))]
     {:voom (apply concat voom-versions)}))
 
