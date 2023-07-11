@@ -21,8 +21,10 @@ Version spec format:
     paths:              STRING-LIST   # 'git' type only
     version-default:    STRING        # 'image' and 'rpm' types only
     version:            STRING
+    version-start:      STRING
     version-regex:      REGEX-STRING
     alt-version:        STRING
+    alt-version-start:  STRING
     alt-version-regex:  REGEX-STRING
     exclude-latest:     true | false  # default to true
     date:               DATE-STRING
@@ -36,9 +38,11 @@ Version spec keys:
   * repo: RPM repository in artifactory.
   * paths: paths to generate voom version for.
   * version-default: version to use when skipping remote queryies.
-  * version: Match beginning of version.
+  * version: Match exact version.
+  * version-start: Match beginning of version.
   * version-regex: Match version against regex.
-  * alt-version: Match beginning of alternate version/tag.
+  * alt-version: Match exact alternate version/tag.
+  * alt-version-start: Match beginning of alternate version/tag.
   * alt-version-regex: Match alternate version against regex.
   * exclude-latest: Do not match 'latest' version/tag (default: true).
   * date: Matches everything earlier or equal to date
@@ -286,8 +290,9 @@ Version spec keys:
 
 (defn filter-rows-1
   [filter-spec row-spec rows]
-  (let [{:keys [exclude-latest date creators version
-                version-regex alt-version alt-version-regex]} filter-spec
+  (let [{:keys [exclude-latest date creators
+                version version-start version-regex
+                alt-version alt-version-start alt-version-regex]} filter-spec
         {:keys [spec-name-field name-field version-field date-field
                 hash-field creator-field ver-delim]} row-spec
         vname (get filter-spec spec-name-field nil)
@@ -310,12 +315,17 @@ Version spec keys:
         rows (cond->> rows
                vname (filter #(= vname (get % name-field)))
 
-               version (filter #(.startsWith (get % version-field) version))
+               version (filter #(= (get % version-field) version))
+
+               version-start (filter #(.startsWith (get % version-field) version-start))
 
                version-regex (filter #(re-seq ver-re (get % version-field)))
 
-               alt-version (filter (fn [r] (some #(.startsWith % alt-version)
+               alt-version (filter (fn [r] (some #(= % alt-version)
                                                  (:all-versions r))))
+
+               alt-version-start (filter (fn [r] (some #(.startsWith % alt-version)
+                                                       (:all-versions r))))
 
                alt-version-regex (filter (fn [r] (some #(re-seq alt-ver-re %)
                                                        (:all-versions r))))
