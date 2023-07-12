@@ -93,7 +93,10 @@ Version spec keys:
          (into {})))
 
 
-(defn validation-error [vname vspec]
+(defn validation-error
+  "Check that vspec has required fields for the type its type. Returns
+  nil spec validates or an error string otherwise"
+  [vname vspec]
   (let [check-missing (fn [v ks]
                         (keep #(when-not (get v %)
                                  (str "missing " (name %)))
@@ -107,6 +110,7 @@ Version spec keys:
       (str vname ": " (S/join ", " errors)))))
 
 (defn merge-defaults-1
+  "Merge a single version-spec item (see merge-defaults docstring)."
   [all-defaults vname vspec]
   (let [all-merged (apply merge (map :all all-defaults))
         ;; :by-name
@@ -123,9 +127,16 @@ Version spec keys:
 
 (defn merge-defaults
   "Merge defaults from all-defaults into each spec item in order of
-  preference: vspec, :by-name, :by-type, :all. For :by-type, if the
-  :type value is not already set vspec or :by-name, then use :type
-  from :all."
+  preference: vspec, :by-name, :by-type, :all. The top-level keys are:
+    * :all: defaults that apply to all other spec values.
+    * :by-type: sub-keys are :image, :rpm, or :git that each contain
+      defaults for all spec values of that type. If the :type value is
+      not already set in the vspec or with :by-name, then it will use
+      :type from :all.
+    * :by-name: sub-keys are spec value names with default that will be
+      applied to the matching spec value by name. If the named spec
+      value does not exist in a specified version-spec file then it
+      will be ignored."
   [all-defaults spec]
   (reduce
     (fn [res [k v]]
@@ -133,28 +144,33 @@ Version spec keys:
     spec spec))
 
 (defn enrich-spec-1
+  "Enrich a single version-spec item (see enrich-spec docstring)."
   [vname vspec]
   (let [{:keys [image namespace registry artifactory-api]} vspec
         [[_ ecr-acct ecr-region]] (re-seq ECR-REPO-RE (or registry ""))]
     (cond-> vspec
       true                (assoc :var-name vname)
-      (rpm? vspec)        (assoc :remote-api :rpm)
+      (rpm? vspec)        (assoc :query-api :rpm)
       (and (image? vspec)
-           artifactory-api) (assoc :remote-api :docker-art
+           artifactory-api) (assoc :query-api :docker-art
                                    :image-repo (if namespace
                                                  (str namespace "/" image)
                                                  (str image)))
       (and (image? vspec)
-           ecr-acct)      (assoc :remote-api :docker-ecr
+           ecr-acct)      (assoc :query-api :docker-ecr
                                  :ecr-repo-acct ecr-acct
                                  :ecr-repo-region ecr-region
                                  :ecr-repo (if namespace
                                              (str namespace "/" image)
                                              (str image)))
-      (git? vspec)        (assoc :remote-api :voom))))
+      (git? vspec)        (assoc :query-api :voom))))
 
 (defn enrich-spec
-  "Enrich each spec value with additional type specific variables."
+  "Enrich each spec value with additional values. :var-name and
+  :query-api are always added. Other values are specific to the
+  query/version API mechanism:
+    * artifactory: :art-repo, :image-repo
+    * ECR: :ecr-repo-acct, :ecr-repo-region, :ecr-repo"
   [spec]
   (reduce
     (fn [res [vname vspec]] (assoc res vname (enrich-spec-1 vname vspec)))
@@ -166,16 +182,12 @@ Version spec keys:
     path))
 
 (defn query-remote-versions
-  "Query remote repos versions and return a map keyed by API type:
-  :docker-art, :docker-ecr, :rpm"
-  [{:keys [debug profile artifactory-base-url] :as cfg} versions]
+  "Query remote repos versions and return a map keyed by :query-api
+  type: :docker-art, :docker-ecr, :rpm"
+  [{:keys [debug profile artifactory-base-url] :as opts} versions]
   (when debug (artifactory/enable-debug))
   (P/let
-    [art-headers (artifactory/get-auth-headers cfg)
-     aws-opts (if profile
-                {:debug debug :profile profile}
-                {:debug debug :no-profile true})
-     [repo-rpms repo-art-images repo-ecr-images]
+    [[repo-rpms repo-art-images repo-ecr-images]
      , (P/all
          [(P/all
             (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
@@ -187,14 +199,16 @@ Version spec keys:
             (for [{:keys [artifactory-api registry image-repo]} (filter :artifactory-api (vals versions))]
               (artifactory/get-full-images
                 registry [image-repo] {:artifactory-api artifactory-api
-                                       :axios-opts {:headers art-headers}})))
+                                       :axios-opts {:headers (artifactory/get-auth-headers opts)}})))
           (P/all
             (for [{:keys [ecr-repo-acct ecr-repo-region ecr-repo]}
                   , (filter :ecr-repo-acct (vals versions))]
               (P/->>
                 (aws/invoke :ECR :DescribeImages
-                            (merge aws-opts {:region ecr-repo-region
-                                             :repositoryName ecr-repo}))
+                            (merge {:region ecr-repo-region
+                                    :repositoryName ecr-repo
+                                    :debug debug}
+                                   (if profile {:profile profile} {:no-profile true})))
                 :imageDetails)))])
 
      ;; Add :rpm-version and parsed :build-date and sort by :build-date
@@ -236,7 +250,8 @@ Version spec keys:
     {:voom (apply concat voom-versions)}))
 
 (defn query-versions
-  "Query remote and local versions and return a combined map."
+  "Query remote (if :resolve-remote is set) and local versions and
+  return a merged map with :query-api types as top-level keys."
   [{:keys [resolve-remote] :as cfg} versions]
   (P/let [[remote-versions local-versions]
           , (P/all [(when resolve-remote
@@ -245,8 +260,11 @@ Version spec keys:
     (merge remote-versions local-versions)))
 
 
-(defn get-version-row-spec [kind]
-  (condp = kind
+(defn get-version-row-spec
+  "For a given :query-api type, return a mapping of fields to where
+  they are found in queried version data for the given query API. "
+  [query-api]
+  (condp = query-api
     :docker-art {:spec-name-field  :image-repo
                  :name-field       :image
                  :version-field    :tag
@@ -274,10 +292,11 @@ Version spec keys:
                  :creator-field    :author}))
 
 (defn enrich-rows-1
-  "Add :version, :full-version, and :hash to all rows"
-  [version-spec {:keys [spec-name-field name-field version-field hash-field ver-delim] :as row-spec}
+  "Add :version, :full-version, and :hash to all rows using the
+  defintion from a single version-spec item."
+  [vspec {:keys [spec-name-field name-field version-field hash-field ver-delim] :as row-spec}
    rows]
-  (let [vname (get version-spec spec-name-field nil)]
+  (let [vname (get vspec spec-name-field nil)]
     (for [row rows
           :let [version (get row version-field)]
           :when version
@@ -289,13 +308,15 @@ Version spec keys:
 
 
 (defn filter-rows-1
-  [filter-spec row-spec rows]
+  "Filter version rows according to a single version-spec item and
+  sorted by date-field (see resolve-versions docstring)."
+  [vspec row-spec rows]
   (let [{:keys [exclude-latest date creators
                 version version-start version-regex
-                alt-version alt-version-start alt-version-regex]} filter-spec
+                alt-version alt-version-start alt-version-regex]} vspec
         {:keys [spec-name-field name-field version-field date-field
                 hash-field creator-field ver-delim]} row-spec
-        vname (get filter-spec spec-name-field nil)
+        vname (get vspec spec-name-field nil)
 
         ;; Group by image/package hash
         grouped-rows (->> rows
@@ -340,30 +361,32 @@ Version spec keys:
     rows))
 
 (defn resolve-versions-1
-  [{:keys [remote-api version-default] :as version-spec} versions]
-  (let [row-spec (get-version-row-spec remote-api)
+  "Resolve versions for a single version-spec item (see
+  resolve-versions docstring)."
+  [{:keys [query-api version-default] :as vspec} versions]
+  (let [row-spec (get-version-row-spec query-api)
         {:keys [name-field spec-name-field version-field]} row-spec
-        ;; Get just the rows for this remote/upstream API type
-        vname (get version-spec spec-name-field nil)
-        rows (get versions remote-api)
+        ;; Get just the rows for this query/version API type
+        vname (get vspec spec-name-field nil)
+        rows (get versions query-api)
         _ (when (and (empty? rows) (empty? version-default))
             (throw (js/Error.
-                     (str vname " must have :remote-api or :version-default"))))
+                     (str vname " must have :query-api or :version-default"))))
         rows (cond
                (empty? rows)
                (->> [{name-field vname
                       version-field version-default}]
-                    (enrich-rows-1 version-spec row-spec))
+                    (enrich-rows-1 vspec row-spec))
 
                :else
                (->> rows
-                   (enrich-rows-1 version-spec row-spec)
-                   (filter-rows-1 version-spec row-spec)))]
-    (assoc version-spec :version-details rows)))
+                   (enrich-rows-1 vspec row-spec)
+                   (filter-rows-1 vspec row-spec)))]
+    (assoc vspec :version-details rows)))
 
-(defn resolve-spec-versions
-  "Takes version spec and remote version rows. Returns an updated spec
-  where each spec items has added version details that are
+(defn resolve-versions
+  "Takes version spec and queried version rows. Returns an updated
+  spec where each spec items has added version details that are
   matched/filtered according to the spec and sorted by date-field.
 
   Filters according to the following row/version selection algorithm:
@@ -390,7 +413,8 @@ Version spec keys:
     spec spec))
 
 (defn normalize-spec
-  "Merge defaults and check spec validity"
+  "Merge defaults into a version-spec and return it. If checked? is
+  set then check spec validity (throw an exception if invalid)."
   [defaults version-spec checked?]
   (let [;; add defaults before validation checks
         full-spec (merge-defaults defaults version-spec)
@@ -407,18 +431,20 @@ Version spec keys:
     full-spec))
 
 (defn resolve-spec
-  "Query remote API versions and then filter/match/merge those against
-  the spec."
+  "Query API versions and then resolve (filter/match/merge) those
+  against each item of the version-spec. If checked? is set then check
+  to make sure all version-spec items resolved to a version (throw if
+  any unresolved)."
   [cfg version-spec checked?]
   (P/let
     [;; Add additional type specific derived values
      enriched-spec (enrich-spec version-spec)
 
-     ;; Query the remote API versions
+     ;; Query the API to get version details
      queried-versions (query-versions cfg enriched-spec)
 
      ;; Resolve/filter versions for each version spec on command line
-     resolved-spec (resolve-spec-versions enriched-spec queried-versions)
+     resolved-spec (resolve-versions enriched-spec queried-versions)
 
      unresolved (filter (comp empty? :version-details) (vals resolved-spec))]
 

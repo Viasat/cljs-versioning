@@ -8,6 +8,7 @@
     "@viasat/cljs-utils": "^0.1.2",
     "@viasat/cljs-apis": "^0.0.1",
     "dateformat": "^5.0.3",
+    "dotenv": "^16.0.3",
     "nbb": "^0.7.132",
     "yaml": "^2.1.3"
   }

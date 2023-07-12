@@ -8,6 +8,7 @@
             [viasat.util :refer [parse-opts load-yaml
                                  Eprintln Eprn Epprint fatal]]
             [viasat.bump :as bump]
+            ["dotenv$default" :as dotenv]
             ["yaml$default" :as yaml]))
 
 (def usage (str "
@@ -63,8 +64,8 @@ to highest):
 Defaults from multiple files are merged at the spec map level. The top
 level keys of the defaults file are:
   * all: defaults that apply to all other spec values.
-  * by-type: sub-keys are 'image' and/or 'rpm' that each contain
-    defaults for all spec values of that type.
+  * by-type: sub-keys are spec type names that each contain defaults
+    for all spec values of that type.
   * by-name: sub-keys are spec value names with default that will be
     applied to the matching spec value by name. If the named spec
     value does not exist in a specified version-spec file then it will
@@ -89,7 +90,8 @@ level keys of the defaults file are:
         (js/process.stdout.write out resolve)))))
 
 (P/let
-  [cfg (parse-opts usage *command-line-args* {:laxPlacement true})
+  [_ (dotenv/config #js {:path ".secrets"})
+   cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
    {:keys [version-spec-files debug verbose defaults-files skip-remote-query
            enumerate print-full-spec print-resolved-spec
