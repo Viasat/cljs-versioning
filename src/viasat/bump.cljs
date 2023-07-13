@@ -184,7 +184,7 @@ Version spec keys:
 (defn query-remote-versions
   "Query remote repos versions and return a map keyed by :query-api
   type: :docker-art, :docker-ecr, :rpm"
-  [{:keys [debug profile artifactory-base-url] :as opts} versions]
+  [{:keys [debug profile no-profile artifactory-base-url] :as opts} versions]
   (when debug (artifactory/enable-debug))
   (P/let
     [[repo-rpms repo-art-images repo-ecr-images]
@@ -208,7 +208,9 @@ Version spec keys:
                             (merge {:region ecr-repo-region
                                     :repositoryName ecr-repo
                                     :debug debug}
-                                   (if profile {:profile profile} {:no-profile true})))
+                                   (if (and profile (not no-profile))
+                                    {:profile profile}
+                                    {:no-profile true})))
                 :imageDetails)))])
 
      ;; Add :rpm-version and parsed :build-date and sort by :build-date
