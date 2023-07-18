@@ -36,7 +36,8 @@
          (throw (js/Error. (str "No logs found for: " (S/join ", " paths)))))
      versions (for [log (S/split logs #"\n")]
                 (let [[sha author committer commit-date] (S/split log #",")
-                      date-str (dateformat (js/Date. commit-date) "yyyymmdd_HHMMss")]
+                      date-str (dateformat (js/Date. commit-date) "UTC:yyyymmdd_HHMMss")]
+                  (prn :commit-date commit-date :data-str date-str)
                   {:paths paths
                    :date-str date-str
                    :sha sha
@@ -49,7 +50,7 @@
           (conj versions
                 (merge
                   curver
-                  {:date-str (dateformat (js/Date.) "yyyymmdd_HHMMss")
+                  {:date-str (dateformat (js/Date.) "UTC:yyyymmdd_HHMMss")
                    :sha (str (:sha curver) dirty-suffix)
                    :voom-version (str (:voom-version curver) dirty-suffix)})))))))
 
