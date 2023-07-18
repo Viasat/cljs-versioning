@@ -37,7 +37,6 @@
      versions (for [log (S/split logs #"\n")]
                 (let [[sha author committer commit-date] (S/split log #",")
                       date-str (dateformat (js/Date. commit-date) "UTC:yyyymmdd_HHMMss")]
-                  (prn :commit-date commit-date :data-str date-str)
                   {:paths paths
                    :date-str date-str
                    :sha sha
