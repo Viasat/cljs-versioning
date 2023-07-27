@@ -30,7 +30,7 @@
     (for [[service sdata] (get dc-raw "services")
           :let [{:strs [args context dockerfile]} (get sdata "build")
                 args-int (get-in dc-int ["services" service "build" "args"])]
-          
+
           [arg val-raw] args]
       (if (or (empty? val-raw) (re-seq ONE-VAR-RE val-raw))
         [{:variable   arg
@@ -76,4 +76,3 @@
   (->> (concat img-vars bld-vars)
        (map (fn [{:keys [variable] :as data}] [variable data]))
        (into {}))))
-
