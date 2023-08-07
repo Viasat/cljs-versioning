@@ -216,8 +216,7 @@ Version spec keys:
      ;; Add :rpm-version and parsed :build-date and sort by :build-date
      rpms (->> (apply concat repo-rpms)
                (map #(merge % {:rpm-version (str (-> % :version :ver)
-                                                 "-" (-> % :version :rel)
-                                                 "." (-> % :arch))
+                                                 "-" (-> % :version :rel))
                                :build-date (-> % :time :build
                                                js/parseInt (* 1000)
                                                js/Date.)}))
