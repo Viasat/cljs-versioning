@@ -28,6 +28,8 @@ Version spec format:
     alt-version-regex:  REGEX-STRING
     exclude-latest:     true | false  # default to true
     date:               DATE-STRING
+    date-before:        DATE-STRING
+    date-after:         DATE-STRING
     creators:           STRING-LIST   # git and artifactory only
 
 Version spec keys:
@@ -45,7 +47,9 @@ Version spec keys:
   * alt-version-start: Match beginning of alternate version/tag.
   * alt-version-regex: Match alternate version against regex.
   * exclude-latest: Do not match 'latest' version/tag (default: true).
-  * date: Matches everything earlier or equal to date
+  * date: Matches everything earlier or equal to date (same as date-before)
+  * date-before: Matches everything earlier or equal to date
+  * date-after: Matches everything equal or later than date
   * creators: Match creator (git author) on any names in list.
 ")
 
@@ -312,7 +316,8 @@ Version spec keys:
   "Filter version rows according to a single version-spec item and
   sorted by date-field (see resolve-versions docstring)."
   [vspec row-spec rows]
-  (let [{:keys [exclude-latest date creators
+  (let [{:keys [exclude-latest creators
+                date date-before date-after
                 version version-start version-regex
                 alt-version alt-version-start alt-version-regex]} vspec
         {:keys [spec-name-field name-field version-field date-field
@@ -329,8 +334,12 @@ Version spec keys:
         rows (for [row rows]
                (assoc row :all-versions (get grouped-rows (:hash row))))
 
+        ;; Coerce date inputs
+        date (when date (js/Date. date))
+        date-before (when date-before (js/Date. date-before))
+        date-after (when date-after (js/Date. date-after))
+
         ;; Filter the rows
-        date (if date (js/Date. date) nil)
         ver-re (js/RegExp. version-regex)
         alt-ver-re (js/RegExp. alt-version-regex)
         rows (sort-by date-field rows)
@@ -355,6 +364,10 @@ Version spec keys:
                exclude-latest (filter #(not= "latest" (get % version-field)))
 
                date (filter #(<= (get % date-field) date))
+
+               date-before (filter #(<= (get % date-field) date-before))
+
+               date-after (filter #(>= (get % date-field) date-after))
 
                (and creator-field
                     (not (empty? creators)))
