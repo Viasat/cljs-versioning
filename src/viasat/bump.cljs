@@ -13,12 +13,13 @@
 (def spec-format "
 Version spec format:
   VARIABLE_NAME:
-    type:               'rpm' | 'image' | 'git'
+    type:               'rpm' | 'image' | 'git' | 'literal'
     image:              STRING        # 'image' type only
     registry:           STRING        # 'image' type only
     name:               STRING        # 'rpm' type only
     repo:               STRING        # 'rpm' type only
     paths:              STRING-LIST   # 'git' type only
+    version-literal:    STRING        # 'literal' type only
     version-default:    STRING        # 'image' and 'rpm' types only
     version:            STRING
     version-start:      STRING
@@ -60,6 +61,7 @@ Version spec keys:
 (defn rpm? [{:keys [type]}] (= "rpm" type))
 (defn image? [{:keys [type]}] (= "image" type))
 (defn git? [{:keys [type]}] (= "git" type))
+(defn literal? [{:keys [type]}] (= "literal" type))
 
 (def -access (promisify (.-access fs)))
 (defn file-exists? [f]
@@ -91,11 +93,31 @@ Version spec keys:
           (first (filter identity paths)))))
     #(filter identity %)))
 
+;; "version-literal" is chosen over simply "version", because "version"
+;; means something to other vspec types.  For example, if we merge and
+;; override a string literal with a full {type: image, ..} spec, we
+;; don't want to accidentally pin that "version" from 'underneath'.
+(defn desugar-vspec
+  "Removes version spec 'sugar'.  String literals are replaced with the
+  expanded format: `{type: literal, version-literal: $STR-LITERAL}`"
+  [vspec]
+  (if (string? vspec)
+    {:type "literal" :version-literal vspec}
+    vspec))
+
+(defn load-default-file [path]
+  (letfn [(desugar-named-defaults [m]
+            (reduce (fn [res [k v]]
+                      (assoc res k (desugar-vspec v)))
+                    {} m))]
+    (P/-> (load-yaml path)
+          (update :by-name desugar-named-defaults))))
+
 (defn load-version-spec [path]
   (P/->> (load-yaml path)
-         (map (fn [[k v]] [(name k) v]))
+         (map (fn [[k v]]
+                [(name k) (desugar-vspec v)]))
          (into {})))
-
 
 (defn validation-error
   "Check that vspec has required fields for the type its type. Returns
@@ -106,10 +128,11 @@ Version spec keys:
                                  (str "missing " (name %)))
                               ks))
         errors (cond-> []
-                 true           (into (check-missing vspec [:type]))
-                 (rpm? vspec)   (into (check-missing vspec [:name :repo]))
-                 (image? vspec) (into (check-missing vspec [:registry :image]))
-                 (git? vspec)   (into (check-missing vspec [:paths])))]
+                 true             (into (check-missing vspec [:type]))
+                 (rpm? vspec)     (into (check-missing vspec [:name :repo]))
+                 (image? vspec)   (into (check-missing vspec [:registry :image]))
+                 (literal? vspec) (into (check-missing vspec [:version-literal]))
+                 (git? vspec)     (into (check-missing vspec [:paths])))]
     (when-not (empty? errors)
       (str vname ": " (S/join ", " errors)))))
 
@@ -167,6 +190,7 @@ Version spec keys:
                                  :ecr-repo (if namespace
                                              (str namespace "/" image)
                                              (str image)))
+      (literal? vspec)    (assoc :query-api :literal)
       (git? vspec)        (assoc :query-api :voom))))
 
 (defn enrich-spec
@@ -242,7 +266,7 @@ Version spec keys:
 
 (defn query-local-versions
   "Query local versions and return a map keyed by version type:
-  :voom (currently only :voom is supported)"
+  :voom, :literal"
   [{:keys [debug root-dir dirty-suffix all-local]
     :or {root-dir "." dirty-suffix "_DIRTY"}} versions]
   (P/let
@@ -251,8 +275,15 @@ Version spec keys:
          (for [[vname vspec] (filter (comp git? val) versions)]
            (P/let [paths (map #(canonicalize % root-dir) (:paths vspec))
                    versions (voom/voom-versions-data paths dirty-suffix all-local)]
-             (map #(assoc % :module vname) versions))))]
-    {:voom (apply concat voom-versions)}))
+             (map #(assoc % :module vname) versions))))
+     literal-versions
+     , (for [[vname vspec] (filter (comp literal? val) versions)]
+         ;; Only a single version exists for a literal, the literal version
+         [{:variable vname
+           :date-str (.toISOString (js/Date.))
+           :version (:version-literal vspec)}])]
+    {:voom (apply concat voom-versions)
+     :literal (apply concat literal-versions)}))
 
 (defn query-versions
   "Query remote (if :resolve-remote is set) and local versions and
@@ -283,6 +314,11 @@ Version spec keys:
                  :date-field       :imagePushedAt
                  :hash-field       [:imageDigest]
                  :ver-delim        ":"}
+    :literal    {:spec-name-field  :var-name
+                 :name-field       :variable
+                 :version-field    :version
+                 :date-field       :date-str
+                 :hash-field       [:variable]}
     :rpm        {:spec-name-field  :name
                  :name-field       :name
                  :version-field    :rpm-version

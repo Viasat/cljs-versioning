@@ -114,7 +114,7 @@ level keys of the defaults file are:
 
    defaults (when defaults-files
               (when verbose (Eprintln "Loading defaults:" defaults-files))
-              (P/all (map load-yaml defaults-files)))
+              (P/all (map bump/load-default-file defaults-files)))
    _ (when verbose (Eprintln "Loading version specs:" (S/join " " version-spec-files)))
    version-spec (P/then (P/all (map bump/load-version-spec version-spec-files))
                         #(apply merge-with merge {} %))
