@@ -219,27 +219,39 @@ Version spec keys:
      , (P/all
          [(P/all
             (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
-              (P/->>
-                (rpm/get-rpms repo {:base-url artifactory-base-url
-                                    :dbg (if debug Eprintln identity)})
-                (map #(assoc % :repo repo)))))
+              (P/catch
+                (P/->>
+                  (rpm/get-rpms repo {:base-url artifactory-base-url
+                                      :dbg (if debug Eprintln identity)})
+                  (map #(assoc % :repo repo)))
+                (fn [err] (throw (ex-info (str "Error querying " repo
+                                               ": " (.-message err))
+                                          {:error err}))))))
           (P/all
             (for [{:keys [artifactory-api registry image-repo]} (filter :artifactory-api (vals versions))]
-              (artifactory/get-full-images
-                registry [image-repo] {:artifactory-api artifactory-api
-                                       :axios-opts {:headers (artifactory/get-auth-headers opts)}})))
+              (P/catch
+                (artifactory/get-full-images
+                  registry [image-repo] {:artifactory-api artifactory-api
+                                         :axios-opts {:headers (artifactory/get-auth-headers opts)}})
+                (fn [err] (throw (ex-info (str "Error querying " image-repo " in " registry
+                                               ": " (.-message err))
+                                          {:error err}))))))
           (P/all
             (for [{:keys [ecr-repo-acct ecr-repo-region ecr-repo]}
                   , (filter :ecr-repo-acct (vals versions))]
-              (P/->>
-                (aws/invoke :ECR :DescribeImages
-                            (merge {:region ecr-repo-region
-                                    :repositoryName ecr-repo
-                                    :debug debug}
-                                   (if (and profile (not no-profile))
-                                    {:profile profile}
-                                    {:no-profile true})))
-                :imageDetails)))])
+              (P/catch
+                (P/->>
+                  (aws/invoke :ECR :DescribeImages
+                              (merge {:region ecr-repo-region
+                                      :repositoryName ecr-repo
+                                      :debug debug}
+                                     (if (and profile (not no-profile))
+                                       {:profile profile}
+                                       {:no-profile true})))
+                  :imageDetails)
+                (fn [err] (throw (ex-info (str "Error querying " ecr-repo " in " ecr-repo-region
+                                               ": " (.-message err))
+                                          {:error err}))))))])
 
      ;; Add :rpm-version and parsed :build-date and sort by :build-date
      rpms (->> (apply concat repo-rpms)
