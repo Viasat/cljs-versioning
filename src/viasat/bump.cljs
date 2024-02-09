@@ -5,7 +5,9 @@
             [viasat.util :refer [read-file load-yaml Eprintln Eprn]]
             [viasat.apis.aws.core :as aws]
             [viasat.apis.artifactory :as artifactory]
+            [viasat.apis.docker :as docker]
             [viasat.apis.rpm :as rpm]
+            [viasat.apis.npm :as npm]
             [viasat.voom :as voom]
             ["fs" :as fs]
             ["util" :refer [promisify]]))
@@ -13,10 +15,11 @@
 (def spec-format "
 Version spec format:
   VARIABLE_NAME:
-    type:               'rpm' | 'image' | 'git' | 'literal'
+    type:               'rpm' | 'image' | 'npm' | 'git' | 'literal'
     image:              STRING        # 'image' type only
-    registry:           STRING        # 'image' type only
-    name:               STRING        # 'rpm' type only
+    registry:           STRING        # 'image' and 'npm' types only
+    name:               STRING        # 'rpm' and 'npm' types only
+    namespace:          STRING        # 'image' type only (docker hub)
     repo:               STRING        # 'rpm' type only
     paths:              STRING-LIST   # 'git' type only
     version-literal:    STRING        # 'literal' type only
@@ -36,9 +39,10 @@ Version spec format:
 Version spec keys:
   * type: 'rpm' (RPM ver), 'image' (docker tag), or 'git' (voom version)
   * image: Docker image name
-  * registry: Docker image registry
-  * name: RPM package name.
-  * repo: RPM repository in artifactory.
+  * registry: Docker image registry or npm package registry
+  * name: NPM or RPM package name.
+  * namespace: docker hub image namespace (default: 'library')
+  * repo: RPM repo URL or repository name in artifactory.
   * paths: paths to generate voom version for.
   * version-default: version to use when skipping remote queryies.
   * version: Match exact version.
@@ -54,13 +58,61 @@ Version spec keys:
   * creators: Match creator (git author) on any names in list.
 ")
 
+;; A map of :query-api types where the values are maps of fields to
+;; where those fields are in queried version data for each query API.
+(def VERSION-ROW-SPEC
+  {:docker-hub {:spec-name-field  :full-image ;; ...
+                :name-field       :full-image ;; ...
+                :version-field    :name       ;; ...
+                :date-field       :last_updated
+                :hash-field       [:digest]
+                :ver-delim        ":"
+                :creator-field    :last_updater_username}
+   :docker-art {:spec-name-field  :full-image
+                :name-field       :image
+                :version-field    :tag
+                :date-field       :lastUpdated
+                :hash-field       [:checksums :sha256]
+                :ver-delim        ":"
+                :creator-field    :createdBy}
+   :docker-ecr {:spec-name-field  :full-image
+                :name-field       :repositoryName
+                :version-field    :tag
+                :date-field       :imagePushedAt
+                :hash-field       [:imageDigest]
+                :ver-delim        ":"}
+   :literal    {:spec-name-field  :var-name
+                :name-field       :variable
+                :version-field    :version
+                :date-field       :date-str
+                :hash-field       [:variable]}
+   :rpm        {:spec-name-field  :name
+                :name-field       :name
+                :version-field    :rpm-version
+                :date-field       :build-date
+                :hash-field       [:checksum (keyword "$t")]
+                :ver-delim        "-"}
+   :npm        {:spec-name-field  :name
+                :name-field       :name
+                :version-field    :version
+                :date-field       :time
+                :hash-field       [:dist :shasum]
+                :ver-delim        "-"}
+   :voom       {:spec-name-field  :var-name
+                :name-field       :module
+                :version-field    :voom-version
+                :date-field       :date-str
+                :hash-field       [:sha]
+                :creator-field    :author}})
+
 ;; General utility functions
 
 (def ECR-REPO-RE #"([^.]*)\.dkr\.ecr\.([^.]*)\.amazonaws\.com")
 
-(defn rpm? [{:keys [type]}] (= "rpm" type))
-(defn image? [{:keys [type]}] (= "image" type))
-(defn git? [{:keys [type]}] (= "git" type))
+(defn rpm?     [{:keys [type]}] (= "rpm" type))
+(defn image?   [{:keys [type]}] (= "image" type))
+(defn npm?     [{:keys [type]}] (= "npm" type))
+(defn git?     [{:keys [type]}] (= "git" type))
 (defn literal? [{:keys [type]}] (= "literal" type))
 
 (def -access (promisify (.-access fs)))
@@ -130,7 +182,8 @@ Version spec keys:
         errors (cond-> []
                  true             (into (check-missing vspec [:type]))
                  (rpm? vspec)     (into (check-missing vspec [:name :repo]))
-                 (image? vspec)   (into (check-missing vspec [:registry :image]))
+                 (image? vspec)   (into (check-missing vspec [:image]))
+                 (npm? vspec)     (into (check-missing vspec [:name]))
                  (literal? vspec) (into (check-missing vspec [:version-literal]))
                  (git? vspec)     (into (check-missing vspec [:paths])))]
     (when-not (empty? errors)
@@ -174,22 +227,20 @@ Version spec keys:
   "Enrich a single version-spec item (see enrich-spec docstring)."
   [vname vspec]
   (let [{:keys [image namespace registry artifactory-api]} vspec
-        [[_ ecr-acct ecr-region]] (re-seq ECR-REPO-RE (or registry ""))]
+        [[_ _ ecr-region]] (re-seq ECR-REPO-RE (or registry ""))]
     (cond-> vspec
       true                (assoc :var-name vname)
       (rpm? vspec)        (assoc :query-api :rpm)
+      (image? vspec)      (assoc :query-api :docker-hub
+                                 :full-image (if namespace
+                                               (str namespace "/" image)
+                                               (str image)))
       (and (image? vspec)
-           artifactory-api) (assoc :query-api :docker-art
-                                   :image-repo (if namespace
-                                                 (str namespace "/" image)
-                                                 (str image)))
+           artifactory-api) (assoc :query-api :docker-art)
       (and (image? vspec)
-           ecr-acct)      (assoc :query-api :docker-ecr
-                                 :ecr-repo-acct ecr-acct
-                                 :ecr-repo-region ecr-region
-                                 :ecr-repo (if namespace
-                                             (str namespace "/" image)
-                                             (str image)))
+           ecr-region)    (assoc :query-api :docker-ecr
+                                 :ecr-repo-region ecr-region)
+      (npm? vspec)        (assoc :query-api :npm)
       (literal? vspec)    (assoc :query-api :literal)
       (git? vspec)        (assoc :query-api :voom))))
 
@@ -197,8 +248,9 @@ Version spec keys:
   "Enrich each spec value with additional values. :var-name and
   :query-api are always added. Other values are specific to the
   query/version API mechanism:
-    * artifactory: :art-repo, :image-repo
-    * ECR: :ecr-repo-acct, :ecr-repo-region, :ecr-repo"
+    * docker hub: :full-image
+    * artifactory: :full-image
+    * ECR: :full-image, :ecr-repo-region"
   [spec]
   (reduce
     (fn [res [vname vspec]] (assoc res vname (enrich-spec-1 vname vspec)))
@@ -211,14 +263,20 @@ Version spec keys:
 
 (defn query-remote-versions
   "Query remote repos versions and return a map keyed by :query-api
-  type: :docker-art, :docker-ecr, :rpm"
+  type: :docker-art, :docker-ecr, :rpm, :npm"
   [{:keys [debug profile no-profile artifactory-base-url] :as opts} versions]
   (when debug (artifactory/enable-debug))
   (P/let
-    [[repo-rpms repo-art-images repo-ecr-images]
+    [repo-rpm-specs (distinct (map :repo (filter rpm? (vals versions))))
+     docker-hub-specs (filter #(= :docker-hub (:query-api %)) (vals versions))
+     docker-art-specs (filter #(= :docker-art (:query-api %)) (vals versions))
+     docker-ecr-specs (filter #(= :docker-ecr (:query-api %)) (vals versions))
+     repo-npm-specs (filter npm? (vals versions))
+
+     [repo-rpms docker-hub-images docker-art-images docker-ecr-images repo-npms]
      , (P/all
          [(P/all
-            (for [repo (distinct (map :repo (filter rpm? (vals versions))))]
+            (for [repo repo-rpm-specs]
               (P/catch
                 (P/->>
                   (rpm/get-rpms repo {:base-url artifactory-base-url
@@ -228,30 +286,48 @@ Version spec keys:
                                                ": " (.-message err))
                                           {:error err}))))))
           (P/all
-            (for [{:keys [artifactory-api registry image-repo]} (filter :artifactory-api (vals versions))]
+            (for [{:keys [registry namespace image full-image]} docker-hub-specs]
+              (P/catch
+                (P/->>
+                  (docker/get-image-tags image {:base-url registry
+                                                :namespace namespace})
+                  (map #(merge % {:full-image full-image})))
+                (fn [err] (throw (ex-info (str "Error querying " full-image
+                                               " in Docker Hub: " (.-message err))
+                                          {:error err}))))))
+          (P/all
+            (for [{:keys [artifactory-api registry full-image]} docker-art-specs]
               (P/catch
                 (artifactory/get-full-images
-                  registry [image-repo] {:artifactory-api artifactory-api
+                  registry [full-image] {:artifactory-api artifactory-api
                                          :axios-opts {:headers (artifactory/get-auth-headers opts)}})
-                (fn [err] (throw (ex-info (str "Error querying " image-repo " in " registry
+                (fn [err] (throw (ex-info (str "Error querying " full-image " in " registry
                                                ": " (.-message err))
                                           {:error err}))))))
           (P/all
-            (for [{:keys [ecr-repo-acct ecr-repo-region ecr-repo]}
-                  , (filter :ecr-repo-acct (vals versions))]
+            (for [{:keys [ecr-repo-region full-image]} docker-ecr-specs]
               (P/catch
                 (P/->>
                   (aws/invoke :ECR :DescribeImages
                               (merge {:region ecr-repo-region
-                                      :repositoryName ecr-repo
+                                      :repositoryName full-image
                                       :debug debug}
                                      (if (and profile (not no-profile))
                                        {:profile profile}
                                        {:no-profile true})))
                   :imageDetails)
-                (fn [err] (throw (ex-info (str "Error querying " ecr-repo " in " ecr-repo-region
+                (fn [err] (throw (ex-info (str "Error querying " full-image " in " ecr-repo-region
                                                ": " (.-message err))
-                                          {:error err}))))))])
+                                          {:error err}))))))
+          (P/all
+            (for [{:keys [registry name]} repo-npm-specs]
+              (P/catch
+                (npm/get-versions name {:base-url registry
+                                        :dbg (if debug Eprintln identity)})
+                (fn [err] (throw (ex-info (str "Error querying " name " in " registry
+                                               ": " (.-message err))
+                                          {:error err}))))))
+          ])
 
      ;; Add :rpm-version and parsed :build-date and sort by :build-date
      rpms (->> (apply concat repo-rpms)
@@ -262,19 +338,34 @@ Version spec keys:
                                                js/Date.)}))
                (sort-by :build-date))
 
+     ;; hoist amd64 image up into main map and sort by :last_updated
+     hub-images (->> (apply concat docker-hub-images)
+                     (map (fn [tag]
+                            (->> (:images tag)
+                                 (filter #(= (:architecture %) "amd64"))
+                                 first
+                                 (merge tag))))
+                     (sort-by :last_updated))
+
      ;; Parse :lastUpdated and sort by it
-     art-images (->> (apply concat repo-art-images)
+     art-images (->> (apply concat docker-art-images)
                      (filter :lastUpdated)
                      (map #(update % :lastUpdated (fn [d] (js/Date. d))))
                      (sort-by :lastUpdated))
 
-     ecr-images (->> (apply concat repo-ecr-images)
+     ecr-images (->> (apply concat docker-ecr-images)
                      (mapcat #(for [t (:imageTags %)]
                                 (-> % (assoc :tag t) (dissoc :imageTags))))
-                     (sort-by :imagePushedAt))]
-    {:docker-art art-images
+                     (sort-by :imagePushedAt))
+
+     ;; Sort by :time
+     npms (->> (apply concat repo-npms)
+               (sort-by :time))]
+    {:docker-hub hub-images
+     :docker-art art-images
      :docker-ecr ecr-images
-     :rpm        rpms}))
+     :rpm        rpms
+     :npm        npms}))
 
 (defn query-local-versions
   "Query local versions and return a map keyed by version type:
@@ -308,41 +399,6 @@ Version spec keys:
     (merge remote-versions local-versions)))
 
 
-(defn get-version-row-spec
-  "For a given :query-api type, return a mapping of fields to where
-  they are found in queried version data for the given query API. "
-  [query-api]
-  (condp = query-api
-    :docker-art {:spec-name-field  :image-repo
-                 :name-field       :image
-                 :version-field    :tag
-                 :date-field       :lastUpdated
-                 :hash-field       [:checksums :sha256]
-                 :ver-delim        ":"
-                 :creator-field    :createdBy}
-    :docker-ecr {:spec-name-field  :ecr-repo
-                 :name-field       :repositoryName
-                 :version-field    :tag
-                 :date-field       :imagePushedAt
-                 :hash-field       [:imageDigest]
-                 :ver-delim        ":"}
-    :literal    {:spec-name-field  :var-name
-                 :name-field       :variable
-                 :version-field    :version
-                 :date-field       :date-str
-                 :hash-field       [:variable]}
-    :rpm        {:spec-name-field  :name
-                 :name-field       :name
-                 :version-field    :rpm-version
-                 :date-field       :build-date
-                 :hash-field       [:checksum (keyword "$t")]
-                 :ver-delim        "-"}
-    :voom       {:spec-name-field  :var-name
-                 :name-field       :module
-                 :version-field    :voom-version
-                 :date-field       :date-str
-                 :hash-field       [:sha]
-                 :creator-field    :author}))
 
 (defn enrich-rows-1
   "Add :version, :full-version, and :hash to all rows using the
@@ -426,7 +482,7 @@ Version spec keys:
   "Resolve versions for a single version-spec item (see
   resolve-versions docstring)."
   [{:keys [query-api version-default] :as vspec} versions]
-  (let [row-spec (get-version-row-spec query-api)
+  (let [row-spec (get VERSION-ROW-SPEC query-api)
         {:keys [name-field spec-name-field version-field]} row-spec
         ;; Get just the rows for this query/version API type
         vname (get vspec spec-name-field nil)
@@ -444,6 +500,7 @@ Version spec keys:
                (->> rows
                    (enrich-rows-1 vspec row-spec)
                    (filter-rows-1 vspec row-spec)))]
+
     (assoc vspec :version-details rows)))
 
 (defn resolve-versions

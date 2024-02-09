@@ -11,3 +11,4 @@ die() { echo >&2 "${*}"; exit 1; }
 
 NODE_PATH="${CUR_DIR}/node_modules":"${TOP_DIR}/node_modules" \
     exec ${NBB} -cp "${CUR_DIR}/src":"${TOP_DIR}/src" "${TOP_DIR}"/${SCRIPT_NAME}.cljs "${@}"
+
