@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "description": "Project versioning tools: bump, voom-like-vesion, docker-compose",
   "repository": "https://github.com/Viasat/cljs-versioning",
-  "license": "Copyright 2023 Viasat, Inc. All Rights Reserved",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@viasat/cljs-utils": "^0.1.2",
     "@viasat/cljs-apis": "^0.0.1",
