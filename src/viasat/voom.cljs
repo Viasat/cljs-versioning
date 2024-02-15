@@ -1,3 +1,6 @@
+;; Copyright (c) 2024, Viasat, Inc
+;; Licensed under EPL 2.0
+
 (ns viasat.voom
   (:require [promesa.core :as P]
             [clojure.string :as S]

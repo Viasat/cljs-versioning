@@ -1,3 +1,6 @@
+;; Copyright (c) 2024, Viasat, Inc
+;; Licensed under EPL 2.0
+
 (ns viasat.docker-compose
   (:require [promesa.core :as P]
             [clojure.string :as S]
