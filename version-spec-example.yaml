@@ -1,0 +1,48 @@
+UBUNTU_DOCKER_HUB_VERSION:
+  type: image
+  # Default registry is Docker Hub. Override to change.
+  #registry: "https://hub.docker.com/v2/namespaces/"
+  # Default is "library" if not specified
+  #namespace: library
+  image: ubuntu
+
+MY_SERVICE_DOCKER_ARTIFACTORY_VERSION:
+  type: image
+  # Point this to your artifactory API base url
+  artifactory-api: "https://artifactory.example.com/artifactory/api"
+  # This is the artifactory docker image repository name
+  registry: my-team-docker
+  namespace: my-project
+  image: my-service
+
+MY_PROJECT_ECR_VERSION:
+  type: image
+  # Update with your AWS account ID
+  registry: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+  # "namespace/image" together form the ECR repositoryName
+  namespace: my-project
+  image: my-service
+
+YAML_NPMJS_VERSION:
+  type: npm
+  # Default registry is npmjs. Override to change .
+  #registry: "https://registry.npmjs.com/"
+  name: yaml
+  version-regex: "^2[.]"                  
+
+MY_PROJECT_NPM_ARTIFACTORY_VERSION:
+  type: npm
+  # Point this to your internal NPM registry
+  registry: "https://artifactory.example.com/api/npm/my-team-npm"
+  name: "@graphite/r6simdc"
+
+CENTOS9_BINUTIL_VERSION:
+  type: rpm
+  repo: "https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os"
+  name: binutils
+
+MY_PROJECT_RPM_VERSION:
+  type: rpm
+  # Point this to the root of your RPM web server
+  repo: "https://storage.example.com/my-team/x86_64/tools"
+  name: my-utility
