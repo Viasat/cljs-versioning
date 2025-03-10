@@ -30,6 +30,8 @@ Options:
   --defaults-files DEFAULTS-FILES     Comma separated files and/or directories with
                                       default spec data. Not used for selecting
                                       which spec names to query/resolve.
+  --only-variables VARIABLE-NAMES     Comma separated list of variables names to resolve.
+                                      If omitted or blank then all are resolved.
   --skip-remote-query                 Skip image/rpm querying and uuse
                                       version-default instead (must be specified fully)
   --enumerate                         List all available versions that match each
@@ -96,8 +98,8 @@ level keys of the defaults file are:
   [_ (dotenv/config #js {:path ".secrets"})
    cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
-   {:keys [version-spec-files debug verbose defaults-files skip-remote-query
-           enumerate print-full-spec print-resolved-spec
+   {:keys [version-spec-files debug verbose defaults-files only-variables
+           skip-remote-query enumerate print-full-spec print-resolved-spec
            output-format short-version]} cfg
    cfg (merge cfg {:resolve-remote (not skip-remote-query)
                    :all-local true})
@@ -122,7 +124,16 @@ level keys of the defaults file are:
    version-spec (P/then (P/all (map bump/load-version-spec version-spec-files))
                         #(apply merge-with merge {} %))
 
-   full-spec (bump/normalize-spec defaults version-spec (not print-full-spec))
+   normalized-spec (bump/normalize-spec defaults version-spec (not print-full-spec))
+
+   only-variables (vec (remove S/blank? (S/split (str only-variables) #",")))
+   _ (let [undefined-specs (remove #(get normalized-spec %) only-variables)]
+       (when (seq undefined-specs)
+         (Eprintln "ERROR - Version specs not defined for --only-variables:" (S/join ", " undefined-specs))
+         (js/process.exit 1)))
+   full-spec (if (empty? only-variables)
+               normalized-spec
+               (select-keys normalized-spec only-variables))
 
    _ (when print-full-spec
        (P/do (print-output output-format full-spec)
