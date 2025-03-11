@@ -32,8 +32,6 @@ Options:
                                       which spec names to query/resolve.
   --only-variables VARIABLE-NAMES     Comma separated list of variables names to resolve.
                                       If omitted or blank then all are resolved.
-  --skip-remote-query                 Skip image/rpm querying and uuse
-                                      version-default instead (must be specified fully)
   --enumerate                         List all available versions that match each
                                       variable version spec
   --print-full-spec                   Output the merged version spec with defaults
@@ -42,6 +40,13 @@ Options:
                                       Defaults to json for --enumerate, --print-*-spec
   --short-version                     Only emit the version value (omit the path/image prefix)
 
+  --skip-remote-query                 Skip image/rpm querying and use
+                                      version-default instead (must be specified fully)
+  --remote-query-timeout DURATION-MS  Request timeout for remote APIs, in milliseconds
+                                      [default: 5000]
+  --remote-query-retries NUM-ATTEMPTS Number of request retries for remote APIs
+                                      [default: 3]
+
   --profile PROFILE                   AWS profile for ECR access [env: PROFILE]
   --artifactory-base-url URL          Artifactory base URL
                                       [env: ARTIFACTORY_BASE_URL]
@@ -49,6 +54,7 @@ Options:
                                       [env: ARTIFACTORY_USERNAME]
   --artifactory-identity-token TOKEN  Artifactory identity token
                                       [env: ARTIFACTORY_IDENTITY_TOKEN]
+
 
 The version-spec-files argument and the defaults-files option are
 comma separated lists of directories and/or files. For directories
@@ -99,10 +105,13 @@ level keys of the defaults file are:
    cfg (parse-opts usage *command-line-args* {:laxPlacement true})
    _ (when (empty? cfg) (fatal 2))
    {:keys [version-spec-files debug verbose defaults-files only-variables
-           skip-remote-query enumerate print-full-spec print-resolved-spec
-           output-format short-version]} cfg
+           enumerate print-full-spec print-resolved-spec output-format short-version
+           skip-remote-query remote-query-timeout remote-query-retries]} cfg
    cfg (merge cfg {:resolve-remote (not skip-remote-query)
-                   :all-local true})
+                   :all-local true
+                   :default-axios-opts {:timeout remote-query-timeout
+                                        :axios-retry {:retries remote-query-retries}}})
+
    verbose (if debug true verbose) ;; debug implies verbose
    _ (when debug (Eprintln "Settings:") (Epprint cfg))
 
