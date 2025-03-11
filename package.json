@@ -1,6 +1,6 @@
 {
   "name": "@lonocloud/cljs-versioning",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Project versioning tools: bump, voom-like-version, docker-compose",
   "repository": "https://github.com/Viasat/cljs-versioning",
   "license": "SEE LICENSE IN LICENSE",
