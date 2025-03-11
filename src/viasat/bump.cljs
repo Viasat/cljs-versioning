@@ -267,7 +267,7 @@ Version spec keys:
 (defn query-remote-versions
   "Query remote repos versions and return a map keyed by :query-api
   type: :docker-art, :docker-ecr, :rpm, :npm"
-  [{:keys [debug profile no-profile artifactory-base-url] :as opts} versions]
+  [{:keys [debug profile no-profile artifactory-base-url default-axios-opts] :as opts} versions]
   (when debug (artifactory/enable-debug))
   (P/let
     [repo-rpm-specs (distinct (map :repo (filter rpm? (vals versions))))
@@ -283,7 +283,8 @@ Version spec keys:
               (P/catch
                 (P/->>
                   (rpm/get-rpms repo {:base-url artifactory-base-url
-                                      :dbg (if debug Eprintln identity)})
+                                      :dbg (if debug Eprintln identity)
+                                      :axios-opts default-axios-opts})
                   (map #(assoc % :repo repo)))
                 (fn [err] (throw (ex-info (str "Error querying " repo
                                                ": " (.-message err))
@@ -293,7 +294,8 @@ Version spec keys:
               (P/catch
                 (P/->>
                   (docker/get-image-tags image {:base-url registry
-                                                :namespace namespace})
+                                                :namespace namespace
+                                                :axios-opts default-axios-opts})
                   (map #(merge % {:full-image full-image})))
                 (fn [err] (throw (ex-info (str "Error querying " full-image
                                                " in Docker Hub: " (.-message err))
@@ -303,7 +305,8 @@ Version spec keys:
               (P/catch
                 (artifactory/get-full-images
                   registry [full-image] {:artifactory-api artifactory-api
-                                         :axios-opts {:headers (artifactory/get-auth-headers opts)}})
+                                         :axios-opts (merge default-axios-opts
+                                                            {:headers (artifactory/get-auth-headers opts)})})
                 (fn [err] (throw (ex-info (str "Error querying " full-image " in " registry
                                                ": " (.-message err))
                                           {:error err}))))))
@@ -326,7 +329,8 @@ Version spec keys:
             (for [{:keys [registry name]} repo-npm-specs]
               (P/catch
                 (npm/get-versions name {:base-url registry
-                                        :dbg (if debug Eprintln identity)})
+                                        :dbg (if debug Eprintln identity)
+                                        :axios-opts default-axios-opts})
                 (fn [err] (throw (ex-info (str "Error querying " name " in " registry
                                                ": " (.-message err))
                                           {:error err}))))))
